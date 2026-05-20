@@ -6,10 +6,10 @@
 
 ### 可视化前端
 
-直接用浏览器打开项目里的 `web/index.html`：
+直接用浏览器打开项目里的 `docs/index.html`：
 
 ```text
-web/index.html
+docs/index.html
 ```
 
 电脑上使用鼠标点击，手机上使用手指点击。先点击一个红方棋子，再点击高亮的目标位置即可走棋。
@@ -47,7 +47,7 @@ g++ -std=c++14 -Iinclude main.cpp src/*.cpp -o chess
 │   ├── Game.cpp
 │   ├── SimpleAI.cpp
 │   └── Types.cpp
-└── web/
+└── docs/
     ├── index.html
     ├── style.css
     └── app.js

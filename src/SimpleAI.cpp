@@ -9,9 +9,10 @@
 namespace {
 const int WinScore = 1000000;
 const int MateScore = 900000;
-const int StrategicDepth = 2;
+const int RootMoveLimit = 12;
+const int StrategicDepth = 3;
 const int StrategicMoveLimit = 6;
-const int TacticalDepth = 4;
+const int TacticalDepth = 5;
 const int TacticalMoveLimit = 6;
 }
 
@@ -25,7 +26,8 @@ Move SimpleAI::chooseMove(const Board &board, Side side) {
 
     int bestScore = std::numeric_limits<int>::min();
     std::vector<Move> bestMoves;
-    for (const Move &move : moves) {
+    std::vector<Move> candidates = orderedMoves(board, side, side, RootMoveLimit, false);
+    for (const Move &move : candidates) {
         int score = moveScore(board, move, side);
         if (score > bestScore) {
             bestScore = score;

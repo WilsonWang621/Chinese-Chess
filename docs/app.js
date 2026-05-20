@@ -49,9 +49,10 @@ const pieceValue = {
     [TYPE.EMPTY]: 0,
 };
 
-const AI_STRATEGIC_DEPTH = 2;
+const AI_ROOT_MOVE_LIMIT = 12;
+const AI_STRATEGIC_DEPTH = 3;
 const AI_STRATEGIC_MOVE_LIMIT = 6;
-const AI_TACTICAL_DEPTH = 4;
+const AI_TACTICAL_DEPTH = 5;
 const AI_TACTICAL_MOVE_LIMIT = 6;
 const AI_WIN_SCORE = 1000000;
 const AI_MATE_SCORE = 900000;
@@ -273,7 +274,8 @@ function aiTurn() {
 function chooseAiMove(moves) {
     let bestScore = -Infinity;
     const bestMoves = [];
-    for (const move of moves) {
+    const candidates = orderMoveList(moves, SIDE.BLACK, SIDE.BLACK, AI_ROOT_MOVE_LIMIT);
+    for (const move of candidates) {
         const snapshot = cloneBoard(board);
         applyMove(move, false);
         const score = strategicSearch(SIDE.RED, SIDE.BLACK, AI_STRATEGIC_DEPTH - 1, -Infinity, Infinity);
@@ -444,7 +446,10 @@ function orderedMoves(side, aiSide, limit, tacticalOnly) {
         const mustAnswerCheck = isInCheck(side);
         moves = moves.filter((move) => mustAnswerCheck || isCapture(move, side));
     }
+    return orderMoveList(moves, side, aiSide, limit);
+}
 
+function orderMoveList(moves, side, aiSide, limit) {
     const scoredMoves = moves.map((move) => ({
         move,
         score: moveOrderScore(move, side, aiSide),
