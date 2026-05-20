@@ -38,6 +38,8 @@ private:
     mutable bool searchStopped_ = false;
 
     int moveScore(const Board &board, const Move &move, Side side, int depth) const;
+    int rootSacrificePenalty(const Board &board, const Move &move, Side side) const;
+    int rootImmediateCaptureAdjustment(const Board &board, const Move &move, Side side) const;
     int strategicSearch(const Board &board, Side turn, Side aiSide, int depth, int alpha, int beta) const;
     int tacticalSearch(const Board &board, Side turn, Side aiSide, int depth, int alpha, int beta) const;
     int evaluatePosition(const Board &board, Side side) const;

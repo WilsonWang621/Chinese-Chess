@@ -51,6 +51,26 @@ Move SimpleAI::chooseMove(const Board &board, Side side) {
 
     std::vector<Move> bestMoves{moves.front()};
     std::vector<Move> candidates = orderedMoves(board, side, side, RootMoveLimit, false);
+    std::vector<Move> urgentCaptures;
+    int urgentCaptureValue = pieceValue(PieceType::Horse);
+    for (const Move &move : moves) {
+        Piece target = board.at(move.to);
+        bool targetInOwnHalf = side == Side::Red ? move.to.row >= 5 : move.to.row <= 4;
+        if (target.side == opponent(side) && targetInOwnHalf && pieceValue(target.type) >= urgentCaptureValue) {
+            urgentCaptures.push_back(move);
+            urgentCaptureValue = std::max(urgentCaptureValue, pieceValue(target.type));
+        }
+    }
+    if (!urgentCaptures.empty()) {
+        std::vector<Move> filtered;
+        for (const Move &move : urgentCaptures) {
+            if (pieceValue(board.at(move.to).type) == urgentCaptureValue) {
+                filtered.push_back(move);
+            }
+        }
+        candidates = filtered;
+        bestMoves = filtered;
+    }
 
     for (int depth = 1; depth <= MaxIterativeDepth; ++depth) {
         int bestScore = std::numeric_limits<int>::min();
@@ -95,9 +115,71 @@ Move SimpleAI::chooseMove(const Board &board, Side side) {
 int SimpleAI::moveScore(const Board &board, const Move &move, Side side, int depth) const {
     Board next = board;
     next.applyMove(move);
-    return strategicSearch(next, opponent(side), side, depth - 1,
-                           std::numeric_limits<int>::min(),
-                           std::numeric_limits<int>::max());
+    int score = strategicSearch(next, opponent(side), side, depth - 1,
+                                std::numeric_limits<int>::min(),
+                                std::numeric_limits<int>::max());
+    return score - rootSacrificePenalty(board, move, side) + rootImmediateCaptureAdjustment(board, move, side);
+}
+
+int SimpleAI::rootSacrificePenalty(const Board &board, const Move &move, Side side) const {
+    if (givesCheck(board, move, side)) {
+        return 0;
+    }
+
+    Piece attacker = board.at(move.from);
+    Piece target = board.at(move.to);
+    int movedValue = pieceValue(attacker.type);
+    int capturedValue = target.side == opponent(side) ? pieceValue(target.type) : 0;
+    int netLoss = movedValue - capturedValue;
+    if (netLoss <= pieceValue(PieceType::Soldier)) {
+        return 0;
+    }
+
+    Board next = board;
+    next.applyMove(move);
+    bool canBeCaptured = false;
+    for (const Move &reply : next.legalMoves(opponent(side))) {
+        if (samePosition(reply.to, move.to)) {
+            canBeCaptured = true;
+            break;
+        }
+    }
+    if (!canBeCaptured) {
+        return 0;
+    }
+
+    int ownPatternGain = weightedTacticalPatternScore(next, side) - weightedTacticalPatternScore(board, side);
+    int enemyPatternDrop = weightedTacticalPatternScore(board, opponent(side)) - weightedTacticalPatternScore(next, opponent(side));
+    int tacticalCompensation = std::max(0, ownPatternGain) + std::max(0, enemyPatternDrop) + threatScore(next, side);
+    int uncompensatedLoss = std::max(0, netLoss - tacticalCompensation / 3);
+    return uncompensatedLoss * 3;
+}
+
+int SimpleAI::rootImmediateCaptureAdjustment(const Board &board, const Move &move, Side side) const {
+    int bestCaptureValue = 0;
+    for (const Move &candidate : board.legalMoves(side)) {
+        Piece target = board.at(candidate.to);
+        if (target.side != opponent(side)) {
+            continue;
+        }
+        int value = pieceValue(target.type);
+        if (value >= pieceValue(PieceType::Horse)) {
+            bestCaptureValue = std::max(bestCaptureValue, value);
+        }
+    }
+    if (bestCaptureValue < pieceValue(PieceType::Horse)) {
+        return 0;
+    }
+
+    Piece target = board.at(move.to);
+    if (target.side == opponent(side)) {
+        int capturedValue = pieceValue(target.type);
+        if (capturedValue >= bestCaptureValue) {
+            return bestCaptureValue * 2;
+        }
+        return capturedValue;
+    }
+    return -bestCaptureValue;
 }
 
 int SimpleAI::strategicSearch(const Board &board, Side turn, Side aiSide, int depth, int alpha, int beta) const {

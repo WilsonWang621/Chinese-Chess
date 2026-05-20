@@ -286,7 +286,21 @@ function chooseAiMove(moves) {
     }
 
     let bestMoves = [moves[0]];
-    const candidates = orderMoveList(moves, SIDE.BLACK, SIDE.BLACK, AI_ROOT_MOVE_LIMIT);
+    let candidates = orderMoveList(moves, SIDE.BLACK, SIDE.BLACK, AI_ROOT_MOVE_LIMIT);
+    const urgentCaptures = [];
+    let urgentCaptureValue = pieceValue[TYPE.HORSE];
+    for (const move of moves) {
+        const target = board[move.to.row][move.to.col];
+        const targetInOwnHalf = move.to.row <= 4;
+        if (target.side === SIDE.RED && targetInOwnHalf && (pieceValue[target.type] || 0) >= urgentCaptureValue) {
+            urgentCaptures.push(move);
+            urgentCaptureValue = Math.max(urgentCaptureValue, pieceValue[target.type] || 0);
+        }
+    }
+    if (urgentCaptures.length > 0) {
+        candidates = urgentCaptures.filter((move) => (pieceValue[board[move.to.row][move.to.col].type] || 0) === urgentCaptureValue);
+        bestMoves = candidates;
+    }
 
     for (let depth = 1; depth <= AI_MAX_ITERATIVE_DEPTH; depth += 1) {
         let bestScore = -Infinity;
@@ -300,7 +314,9 @@ function chooseAiMove(moves) {
 
             const snapshot = cloneBoard(board);
             applyMove(move, false);
-            const score = strategicSearch(SIDE.RED, SIDE.BLACK, depth - 1, -Infinity, Infinity);
+            const score = strategicSearch(SIDE.RED, SIDE.BLACK, depth - 1, -Infinity, Infinity) -
+                rootSacrificePenalty(snapshot, move, SIDE.BLACK) +
+                rootImmediateCaptureAdjustment(snapshot, move, SIDE.BLACK);
             board = snapshot;
 
             if (aiSearchStopped) {
@@ -322,6 +338,70 @@ function chooseAiMove(moves) {
         candidates.sort((left, right) => Number(moveKey(right) === moveKey(bestMoves[0])) - Number(moveKey(left) === moveKey(bestMoves[0])));
     }
     return bestMoves[Math.floor(Math.random() * bestMoves.length)];
+}
+
+function rootSacrificePenalty(sourceBoard, move, side) {
+    const snapshot = cloneBoard(board);
+    board = cloneBoard(sourceBoard);
+    if (givesCheck(move, side)) {
+        board = snapshot;
+        return 0;
+    }
+
+    const attacker = board[move.from.row][move.from.col];
+    const target = board[move.to.row][move.to.col];
+    const movedValue = pieceValue[attacker.type] || 0;
+    const capturedValue = target.side === opponent(side) ? pieceValue[target.type] || 0 : 0;
+    const netLoss = movedValue - capturedValue;
+    if (netLoss <= pieceValue[TYPE.SOLDIER]) {
+        board = snapshot;
+        return 0;
+    }
+
+    const beforeOwnPattern = weightedTacticalPatternScore(side);
+    const beforeEnemyPattern = weightedTacticalPatternScore(opponent(side));
+    applyMove(move, false);
+    const canBeCaptured = legalMoves(opponent(side)).some((reply) => samePos(reply.to, move.to));
+    if (!canBeCaptured) {
+        board = snapshot;
+        return 0;
+    }
+
+    const ownPatternGain = weightedTacticalPatternScore(side) - beforeOwnPattern;
+    const enemyPatternDrop = beforeEnemyPattern - weightedTacticalPatternScore(opponent(side));
+    const tacticalCompensation = Math.max(0, ownPatternGain) + Math.max(0, enemyPatternDrop) + threatScore(side);
+    const uncompensatedLoss = Math.max(0, netLoss - Math.floor(tacticalCompensation / 3));
+    board = snapshot;
+    return uncompensatedLoss * 3;
+}
+
+function rootImmediateCaptureAdjustment(sourceBoard, move, side) {
+    const snapshot = cloneBoard(board);
+    board = cloneBoard(sourceBoard);
+    let bestCaptureValue = 0;
+    for (const candidate of legalMoves(side)) {
+        const target = board[candidate.to.row][candidate.to.col];
+        if (target.side !== opponent(side)) {
+            continue;
+        }
+        const value = pieceValue[target.type] || 0;
+        if (value >= pieceValue[TYPE.HORSE]) {
+            bestCaptureValue = Math.max(bestCaptureValue, value);
+        }
+    }
+
+    let adjustment = 0;
+    if (bestCaptureValue >= pieceValue[TYPE.HORSE]) {
+        const target = board[move.to.row][move.to.col];
+        if (target.side === opponent(side)) {
+            const capturedValue = pieceValue[target.type] || 0;
+            adjustment = capturedValue >= bestCaptureValue ? bestCaptureValue * 2 : capturedValue;
+        } else {
+            adjustment = -bestCaptureValue;
+        }
+    }
+    board = snapshot;
+    return adjustment;
 }
 
 function strategicSearch(sideToMove, aiSide, depth, alpha, beta) {
