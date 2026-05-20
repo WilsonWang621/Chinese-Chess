@@ -11,6 +11,7 @@ public:
 private:
     Board board_;
     SimpleAI ai_;
+    bool humanResigned_ = false;
 
     bool humanTurn();
     void clearLine();

@@ -7,7 +7,7 @@
 void Game::run() {
     std::cout << "Chinese Chess: human Red (uppercase) vs AI Black (lowercase)\n";
     std::cout << "Input: from_row from_col to_row to_col, for example: 6 0 5 0\n";
-    std::cout << "Type q to quit.\n";
+    std::cout << "Type q to quit, r to resign and start over.\n";
 
     while (true) {
         board_.print();
@@ -20,13 +20,12 @@ void Game::run() {
             return;
         }
 
-        if (board_.legalMoves(Side::Red).empty()) {
-            std::cout << "You have no legal moves. AI wins.\n";
-            return;
-        }
-
+        humanResigned_ = false;
         if (!humanTurn()) {
             return;
+        }
+        if (humanResigned_) {
+            continue;
         }
 
         if (!board_.hasGeneral(Side::Black) || board_.legalMoves(Side::Black).empty()) {
@@ -52,6 +51,12 @@ bool Game::humanTurn() {
         if (first == "q" || first == "Q") {
             return false;
         }
+        if (first == "r" || first == "R") {
+            board_.reset();
+            humanResigned_ = true;
+            std::cout << "You resigned. New game started.\n";
+            return true;
+        }
 
         Move move;
         try {
@@ -69,7 +74,7 @@ bool Game::humanTurn() {
             continue;
         }
 
-        if (!board_.isLegalMove(move, Side::Red)) {
+        if (!board_.isRuleMove(move, Side::Red)) {
             std::cout << "Illegal move.\n";
             continue;
         }

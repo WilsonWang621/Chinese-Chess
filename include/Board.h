@@ -18,7 +18,9 @@ public:
     bool inBounds(Position pos) const;
     Piece at(Position pos) const;
     bool applyMove(const Move &move);
+    std::vector<Move> ruleMoves(Side side) const;
     std::vector<Move> legalMoves(Side side) const;
+    bool isRuleMove(const Move &move, Side side) const;
     bool isLegalMove(const Move &move, Side side) const;
     bool isInCheck(Side side) const;
     bool hasGeneral(Side side) const;

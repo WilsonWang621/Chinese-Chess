@@ -50,12 +50,14 @@ const pieceValue = {
 };
 
 const AI_ROOT_MOVE_LIMIT = 12;
-const AI_STRATEGIC_DEPTH = 3;
-const AI_STRATEGIC_MOVE_LIMIT = 6;
+const AI_MAX_ITERATIVE_DEPTH = 5;
+const AI_MOVE_TIME_MS = 1200;
+const AI_STRATEGIC_MOVE_LIMIT = 10;
 const AI_TACTICAL_DEPTH = 5;
-const AI_TACTICAL_MOVE_LIMIT = 6;
+const AI_TACTICAL_MOVE_LIMIT = 10;
 const AI_WIN_SCORE = 1000000;
 const AI_MATE_SCORE = 900000;
+const AI_TRANSPOSITION_LIMIT = 60000;
 
 let board = [];
 let turn = SIDE.RED;
@@ -63,12 +65,17 @@ let selected = null;
 let legalForSelected = [];
 let lastMove = null;
 let gameOver = false;
+let aiDeadline = 0;
+let aiSearchStopped = false;
+const aiTransposition = new Map();
+const aiHistory = new Map();
 
 const boardEl = document.getElementById("board");
 const statusText = document.getElementById("statusText");
 const turnBadge = document.getElementById("turnBadge");
 const moveList = document.getElementById("moveList");
 const resetButton = document.getElementById("resetButton");
+const resignButton = document.getElementById("resignButton");
 const overlayResetButton = document.getElementById("overlayResetButton");
 const resultOverlay = document.getElementById("resultOverlay");
 const resultTitle = document.getElementById("resultTitle");
@@ -215,7 +222,7 @@ function handleCellClick(row, col) {
 
     if (piece.side === SIDE.RED) {
         selected = pos;
-        legalForSelected = legalMoves(SIDE.RED).filter((move) => samePos(move.from, pos));
+        legalForSelected = ruleMoves(SIDE.RED).filter((move) => samePos(move.from, pos));
         setStatus(`${pieceName(piece)}：选择落点`);
     } else {
         selected = null;
@@ -272,26 +279,56 @@ function aiTurn() {
 }
 
 function chooseAiMove(moves) {
-    let bestScore = -Infinity;
-    const bestMoves = [];
+    aiDeadline = performance.now() + AI_MOVE_TIME_MS;
+    aiSearchStopped = false;
+    if (aiTransposition.size > AI_TRANSPOSITION_LIMIT) {
+        aiTransposition.clear();
+    }
+
+    let bestMoves = [moves[0]];
     const candidates = orderMoveList(moves, SIDE.BLACK, SIDE.BLACK, AI_ROOT_MOVE_LIMIT);
-    for (const move of candidates) {
-        const snapshot = cloneBoard(board);
-        applyMove(move, false);
-        const score = strategicSearch(SIDE.RED, SIDE.BLACK, AI_STRATEGIC_DEPTH - 1, -Infinity, Infinity);
-        board = snapshot;
-        if (score > bestScore) {
-            bestScore = score;
-            bestMoves.length = 0;
-            bestMoves.push(move);
-        } else if (score === bestScore) {
-            bestMoves.push(move);
+
+    for (let depth = 1; depth <= AI_MAX_ITERATIVE_DEPTH; depth += 1) {
+        let bestScore = -Infinity;
+        const depthBestMoves = [];
+
+        for (const move of candidates) {
+            if (timeExpired()) {
+                aiSearchStopped = true;
+                break;
+            }
+
+            const snapshot = cloneBoard(board);
+            applyMove(move, false);
+            const score = strategicSearch(SIDE.RED, SIDE.BLACK, depth - 1, -Infinity, Infinity);
+            board = snapshot;
+
+            if (aiSearchStopped) {
+                break;
+            }
+            if (score > bestScore) {
+                bestScore = score;
+                depthBestMoves.length = 0;
+                depthBestMoves.push(move);
+            } else if (score === bestScore) {
+                depthBestMoves.push(move);
+            }
         }
+
+        if (aiSearchStopped || depthBestMoves.length === 0) {
+            break;
+        }
+        bestMoves = depthBestMoves;
+        candidates.sort((left, right) => Number(moveKey(right) === moveKey(bestMoves[0])) - Number(moveKey(left) === moveKey(bestMoves[0])));
     }
     return bestMoves[Math.floor(Math.random() * bestMoves.length)];
 }
 
 function strategicSearch(sideToMove, aiSide, depth, alpha, beta) {
+    if (timeExpired()) {
+        aiSearchStopped = true;
+        return evaluatePosition(aiSide);
+    }
     if (!hasGeneral(aiSide)) {
         return -AI_WIN_SCORE - depth;
     }
@@ -311,30 +348,76 @@ function strategicSearch(sideToMove, aiSide, depth, alpha, beta) {
         return tacticalSearch(sideToMove, aiSide, AI_TACTICAL_DEPTH, alpha, beta);
     }
 
+    const originalAlpha = alpha;
+    const originalBeta = beta;
+    const hash = boardHash(sideToMove, aiSide);
+    const cached = aiTransposition.get(hash);
+    if (cached && cached.depth >= depth) {
+        if (cached.bound === "exact") {
+            return cached.score;
+        }
+        if (cached.bound === "lower") {
+            alpha = Math.max(alpha, cached.score);
+        } else if (cached.bound === "upper") {
+            beta = Math.min(beta, cached.score);
+        }
+        if (alpha >= beta) {
+            return cached.score;
+        }
+    }
+
     const moves = orderedMoves(sideToMove, aiSide, AI_STRATEGIC_MOVE_LIMIT, false);
     let bestScore = sideToMove === aiSide ? -Infinity : Infinity;
+    let bestMove = cached ? cached.bestMove : "";
     for (const move of moves) {
         const snapshot = cloneBoard(board);
         applyMove(move, false);
         const score = strategicSearch(opponent(sideToMove), aiSide, depth - 1, alpha, beta);
         board = snapshot;
 
+        if (aiSearchStopped) {
+            return evaluatePosition(aiSide);
+        }
         if (sideToMove === aiSide) {
-            bestScore = Math.max(bestScore, score);
+            if (score > bestScore) {
+                bestScore = score;
+                bestMove = moveKey(move);
+            }
             alpha = Math.max(alpha, bestScore);
         } else {
-            bestScore = Math.min(bestScore, score);
+            if (score < bestScore) {
+                bestScore = score;
+                bestMove = moveKey(move);
+            }
             beta = Math.min(beta, bestScore);
         }
 
         if (beta <= alpha) {
+            if (!isCapture(move, sideToMove)) {
+                const key = historyKey(sideToMove, move);
+                aiHistory.set(key, (aiHistory.get(key) || 0) + depth * depth);
+            }
             break;
         }
+    }
+
+    if (!aiSearchStopped) {
+        let bound = "exact";
+        if (bestScore <= originalAlpha) {
+            bound = "upper";
+        } else if (bestScore >= originalBeta) {
+            bound = "lower";
+        }
+        aiTransposition.set(hash, { depth, score: bestScore, bestMove, bound });
     }
     return bestScore;
 }
 
 function tacticalSearch(sideToMove, aiSide, depth, alpha, beta) {
+    if (timeExpired()) {
+        aiSearchStopped = true;
+        return evaluatePosition(aiSide);
+    }
     if (depth <= 0 || !hasGeneral(SIDE.RED) || !hasGeneral(SIDE.BLACK)) {
         return evaluatePosition(aiSide);
     }
@@ -351,6 +434,9 @@ function tacticalSearch(sideToMove, aiSide, depth, alpha, beta) {
         const score = tacticalSearch(opponent(sideToMove), aiSide, depth - 1, alpha, beta);
         board = snapshot;
 
+        if (aiSearchStopped) {
+            return evaluatePosition(aiSide);
+        }
         if (sideToMove === aiSide) {
             bestScore = Math.max(bestScore, score);
             alpha = Math.max(alpha, bestScore);
@@ -388,6 +474,8 @@ function evaluatePosition(side) {
 
     score += threatScore(side) * 2;
     score -= threatScore(opponent(side)) * 3;
+    score += tacticalPatternScore(side);
+    score -= tacticalPatternScore(opponent(side)) * 2;
     if (isInCheck(opponent(side))) {
         score += 260;
     }
@@ -440,6 +528,161 @@ function threatScore(side) {
     return threats.slice(0, 3).reduce((sum, value, index) => sum + Math.floor(value / (index + 1)), 0);
 }
 
+function tacticalPatternScore(side) {
+    return palaceAttackScore(side) + linePressureScore(side) + mobilityLockScore(side);
+}
+
+function palaceAttackScore(side) {
+    const enemy = opponent(side);
+    const enemyGeneral = findGeneral(enemy);
+    if (!inBounds(enemyGeneral)) {
+        return Math.floor(AI_WIN_SCORE / 2);
+    }
+
+    let score = 0;
+    let attackCount = 0;
+    let checkingPieces = 0;
+    let horsePressure = 0;
+    let cannonPressure = 0;
+    let chariotPressure = 0;
+    let soldierPressure = 0;
+    let advisors = 0;
+
+    for (let row = 0; row < ROWS; row += 1) {
+        for (let col = 0; col < COLS; col += 1) {
+            const piece = board[row][col];
+            if (piece.side === enemy && piece.type === TYPE.ADVISOR && inPalace({ row, col }, enemy)) {
+                advisors += 1;
+            }
+        }
+    }
+
+    for (const move of legalMoves(side)) {
+        const attacker = board[move.from.row][move.from.col];
+        const inEnemyPalace = inPalace(move.to, enemy);
+        const attacksGeneral = samePos(move.to, enemyGeneral);
+        if (inEnemyPalace || attacksGeneral) {
+            attackCount += 1;
+            score += 24;
+        }
+        if (attacksGeneral) {
+            checkingPieces += 1;
+            score += 180;
+        }
+        if (inEnemyPalace) {
+            if (attacker.type === TYPE.HORSE) {
+                horsePressure += 1;
+                score += 95;
+            } else if (attacker.type === TYPE.CANNON) {
+                cannonPressure += 1;
+                score += 115;
+            } else if (attacker.type === TYPE.CHARIOT) {
+                chariotPressure += 1;
+                score += 120;
+            } else if (attacker.type === TYPE.SOLDIER) {
+                soldierPressure += 1;
+                score += 85;
+            }
+        }
+    }
+
+    if (advisors < 2) {
+        score += (2 - advisors) * 140;
+    }
+    if (horsePressure > 0 && cannonPressure > 0) {
+        score += 260;
+    }
+    if (cannonPressure >= 2) {
+        score += 280;
+    }
+    if (chariotPressure > 0 && cannonPressure > 0) {
+        score += 240;
+    }
+    if (chariotPressure >= 2) {
+        score += 220;
+    }
+    if (soldierPressure > 0 && (cannonPressure > 0 || chariotPressure > 0)) {
+        score += 180;
+    }
+    if (checkingPieces >= 2 || attackCount >= 4) {
+        score += 220;
+    }
+    return score;
+}
+
+function linePressureScore(side) {
+    const enemy = opponent(side);
+    const enemyGeneral = findGeneral(enemy);
+    if (!inBounds(enemyGeneral)) {
+        return Math.floor(AI_WIN_SCORE / 2);
+    }
+
+    let score = 0;
+    let centerCannons = 0;
+    let bottomCannons = 0;
+    let sameFileCannonPressure = 0;
+
+    for (let row = 0; row < ROWS; row += 1) {
+        for (let col = 0; col < COLS; col += 1) {
+            const piece = board[row][col];
+            if (piece.side !== side) {
+                continue;
+            }
+            const pos = { row, col };
+            const sameFile = col === enemyGeneral.col;
+            const sameRank = row === enemyGeneral.row;
+            if (!sameFile && !sameRank) {
+                continue;
+            }
+
+            const between = linePiecesBetween(pos, enemyGeneral);
+            if (piece.type === TYPE.CANNON) {
+                if (sameFile && between === 1) {
+                    score += 230;
+                    sameFileCannonPressure += 1;
+                } else if (between === 1) {
+                    score += 140;
+                }
+                if (sameFile && Math.abs(row - enemyGeneral.row) >= 3) {
+                    centerCannons += 1;
+                }
+                if (sameFile && inPalace({ row: enemy === SIDE.RED ? 9 : 0, col }, enemy)) {
+                    bottomCannons += 1;
+                }
+            } else if (piece.type === TYPE.CHARIOT && between === 0) {
+                score += 220;
+            }
+        }
+    }
+
+    if (sameFileCannonPressure >= 2 || (centerCannons > 0 && bottomCannons > 0)) {
+        score += 320;
+    }
+    return score;
+}
+
+function mobilityLockScore(side) {
+    const enemy = opponent(side);
+    const enemyMoves = legalMoves(enemy);
+    let score = 0;
+    for (let row = 0; row < ROWS; row += 1) {
+        for (let col = 0; col < COLS; col += 1) {
+            const piece = board[row][col];
+            if (piece.side !== enemy || (piece.type !== TYPE.CHARIOT && piece.type !== TYPE.HORSE)) {
+                continue;
+            }
+            const mobility = enemyMoves.filter((move) => samePos(move.from, { row, col })).length;
+            const undeveloped = enemy === SIDE.RED ? row >= 7 : row <= 2;
+            if (mobility === 0) {
+                score += piece.type === TYPE.CHARIOT ? 180 : 120;
+            } else if (mobility === 1 && undeveloped) {
+                score += piece.type === TYPE.CHARIOT ? 100 : 70;
+            }
+        }
+    }
+    return score;
+}
+
 function orderedMoves(side, aiSide, limit, tacticalOnly) {
     let moves = legalMoves(side);
     if (tacticalOnly) {
@@ -450,33 +693,40 @@ function orderedMoves(side, aiSide, limit, tacticalOnly) {
 }
 
 function orderMoveList(moves, side, aiSide, limit) {
+    const cached = aiTransposition.get(boardHash(side, aiSide));
+    const bestMove = cached ? cached.bestMove : "";
     const scoredMoves = moves.map((move) => ({
         move,
-        score: moveOrderScore(move, side, aiSide),
+        score: moveOrderScore(move, side, aiSide, bestMove),
     }));
     scoredMoves.sort((left, right) => right.score - left.score);
     const limitedMoves = limit > 0 ? scoredMoves.slice(0, limit) : scoredMoves;
     return limitedMoves.map((entry) => entry.move);
 }
 
-function moveOrderScore(move, side, aiSide) {
+function moveOrderScore(move, side, aiSide, bestMove) {
     const attacker = board[move.from.row][move.from.col];
     const target = board[move.to.row][move.to.col];
-    let score = 0;
+    let score = moveKey(move) === bestMove ? 100000 : 0;
     if (target.type !== TYPE.EMPTY && target.side === opponent(side)) {
-        score += (pieceValue[target.type] || 0) * 12 - (pieceValue[attacker.type] || 0);
+        score += (pieceValue[target.type] || 0) * 16 - (pieceValue[attacker.type] || 0);
     }
     if (givesCheck(move, side)) {
-        score += 2200;
+        score += 5000;
     }
 
     const snapshot = cloneBoard(board);
     applyMove(move, false);
     score += Math.floor(evaluateMaterial(aiSide) / 10);
+    const patternGain = tacticalPatternScore(side) - tacticalPatternScore(opponent(side));
     if (isInCheck(side)) {
         score -= 500;
     }
     board = snapshot;
+    score += patternGain * 2;
+    if (target.type === TYPE.EMPTY) {
+        score += aiHistory.get(historyKey(side, move)) || 0;
+    }
     return score;
 }
 
@@ -508,10 +758,39 @@ function givesCheck(move, side) {
     return checking;
 }
 
+function timeExpired() {
+    return performance.now() >= aiDeadline;
+}
+
+function boardHash(sideToMove, aiSide) {
+    const parts = [sideToMove, aiSide];
+    for (let row = 0; row < ROWS; row += 1) {
+        for (let col = 0; col < COLS; col += 1) {
+            const piece = board[row][col];
+            if (piece.type !== TYPE.EMPTY) {
+                parts.push(row, col, piece.side, piece.type);
+            }
+        }
+    }
+    return parts.join("|");
+}
+
+function moveKey(move) {
+    return `${move.from.row},${move.from.col}-${move.to.row},${move.to.col}`;
+}
+
+function historyKey(side, move) {
+    return `${side}:${moveKey(move)}`;
+}
+
 function checkGameEndAfterMove(nextSide, winMessage) {
     if (!hasGeneral(nextSide)) {
         endGame(winMessage);
         return true;
+    }
+
+    if (nextSide === SIDE.RED) {
+        return false;
     }
 
     const moves = legalMoves(nextSide);
@@ -597,6 +876,20 @@ function legalMoves(side) {
                     result.push(move);
                 }
             }
+        }
+    }
+    return result;
+}
+
+function ruleMoves(side) {
+    const result = [];
+    for (let row = 0; row < ROWS; row += 1) {
+        for (let col = 0; col < COLS; col += 1) {
+            const from = { row, col };
+            if (board[row][col].side !== side) {
+                continue;
+            }
+            result.push(...pseudoMoves(from));
         }
     }
     return result;
@@ -809,6 +1102,25 @@ function clearLine(from, to) {
     return true;
 }
 
+function linePiecesBetween(from, to) {
+    if (from.row !== to.row && from.col !== to.col) {
+        return -1;
+    }
+    const dr = Math.sign(to.row - from.row);
+    const dc = Math.sign(to.col - from.col);
+    let row = from.row + dr;
+    let col = from.col + dc;
+    let count = 0;
+    while (row !== to.row || col !== to.col) {
+        if (board[row][col].type !== TYPE.EMPTY) {
+            count += 1;
+        }
+        row += dr;
+        col += dc;
+    }
+    return count;
+}
+
 function samePos(a, b) {
     return a && b && a.row === b.row && a.col === b.col;
 }
@@ -818,5 +1130,6 @@ function opponent(side) {
 }
 
 resetButton.addEventListener("click", resetBoard);
+resignButton.addEventListener("click", resetBoard);
 overlayResetButton.addEventListener("click", resetBoard);
 resetBoard();

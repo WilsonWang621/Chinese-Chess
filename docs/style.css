@@ -83,7 +83,14 @@ h2 {
     font-size: 15px;
 }
 
-#resetButton {
+.topbar-actions {
+    flex: 0 0 auto;
+    display: flex;
+    gap: 8px;
+}
+
+#resetButton,
+#resignButton {
     flex: 0 0 auto;
     min-height: 40px;
     padding: 0 14px;
@@ -94,7 +101,14 @@ h2 {
     cursor: pointer;
 }
 
-#resetButton:hover {
+#resignButton {
+    color: #fffaf0;
+    background: var(--danger);
+    border-color: rgba(180, 58, 36, 0.55);
+}
+
+#resetButton:hover,
+#resignButton:hover {
     border-color: rgba(36, 25, 21, 0.38);
 }
 

@@ -61,6 +61,22 @@ bool Board::applyMove(const Move &move) {
     return true;
 }
 
+std::vector<Move> Board::ruleMoves(Side side) const {
+    std::vector<Move> result;
+    for (int row = 0; row < Rows; ++row) {
+        for (int col = 0; col < Cols; ++col) {
+            Position from{row, col};
+            if (at(from).side != side) {
+                continue;
+            }
+            for (const Move &move : pseudoMoves(from)) {
+                result.push_back(move);
+            }
+        }
+    }
+    return result;
+}
+
 std::vector<Move> Board::legalMoves(Side side) const {
     std::vector<Move> result;
     for (int row = 0; row < Rows; ++row) {
@@ -79,6 +95,16 @@ std::vector<Move> Board::legalMoves(Side side) const {
         }
     }
     return result;
+}
+
+bool Board::isRuleMove(const Move &move, Side side) const {
+    std::vector<Move> moves = ruleMoves(side);
+    return std::any_of(moves.begin(), moves.end(), [&](const Move &candidate) {
+        return candidate.from.row == move.from.row &&
+               candidate.from.col == move.from.col &&
+               candidate.to.row == move.to.row &&
+               candidate.to.col == move.to.col;
+    });
 }
 
 bool Board::isLegalMove(const Move &move, Side side) const {
