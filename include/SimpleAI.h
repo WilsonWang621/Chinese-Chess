@@ -44,11 +44,14 @@ private:
     int evaluateMaterial(const Board &board, Side side) const;
     int positionalValue(Piece piece, Position pos, Side side) const;
     int threatScore(const Board &board, Side side) const;
+    int weightedTacticalPatternScore(const Board &board, Side side) const;
+    int tacticalOpportunityScale(const Board &board, Side side) const;
     int tacticalPatternScore(const Board &board, Side side) const;
     int palaceAttackScore(const Board &board, Side side) const;
     int linePressureScore(const Board &board, Side side) const;
     int mobilityLockScore(const Board &board, Side side) const;
     int moveOrderScore(const Board &board, const Move &move, Side movingSide, Side aiSide, int ttBestMove) const;
+    int hangingMovePenalty(const Board &board, const Move &move, Side movingSide) const;
     std::vector<Move> orderedMoves(const Board &board, Side side, Side aiSide, int limit, bool tacticalOnly) const;
     bool isCapture(const Board &board, const Move &move, Side side) const;
     bool givesCheck(const Board &board, const Move &move, Side side) const;

@@ -474,8 +474,8 @@ function evaluatePosition(side) {
 
     score += threatScore(side) * 2;
     score -= threatScore(opponent(side)) * 3;
-    score += tacticalPatternScore(side);
-    score -= tacticalPatternScore(opponent(side)) * 2;
+    score += weightedTacticalPatternScore(side);
+    score -= weightedTacticalPatternScore(opponent(side)) * 2;
     if (isInCheck(opponent(side))) {
         score += 260;
     }
@@ -530,6 +530,57 @@ function threatScore(side) {
 
 function tacticalPatternScore(side) {
     return palaceAttackScore(side) + linePressureScore(side) + mobilityLockScore(side);
+}
+
+function weightedTacticalPatternScore(side) {
+    return Math.floor((tacticalPatternScore(side) * tacticalOpportunityScale(side)) / 100);
+}
+
+function tacticalOpportunityScale(side) {
+    const enemy = opponent(side);
+    let pieces = 0;
+    let attackersInEnemyHalf = 0;
+    for (let row = 0; row < ROWS; row += 1) {
+        for (let col = 0; col < COLS; col += 1) {
+            const piece = board[row][col];
+            if (piece.type === TYPE.EMPTY) {
+                continue;
+            }
+            pieces += 1;
+            if (piece.side === side && piece.type !== TYPE.GENERAL) {
+                const inEnemyHalf = side === SIDE.RED ? row <= 4 : row >= 5;
+                if (inEnemyHalf) {
+                    attackersInEnemyHalf += 1;
+                }
+            }
+        }
+    }
+
+    let scale = 30 + attackersInEnemyHalf * 10;
+    if (pieces <= 26) {
+        scale += 25;
+    } else if (pieces >= 30) {
+        scale -= 15;
+    }
+    if (isInCheck(enemy)) {
+        scale += 45;
+    }
+
+    let forcingMoves = 0;
+    for (const move of legalMoves(side)) {
+        const target = board[move.to.row][move.to.col];
+        if (target.side === enemy && (pieceValue[target.type] || 0) >= pieceValue[TYPE.HORSE]) {
+            forcingMoves += 1;
+        }
+        if (givesCheck(move, side)) {
+            forcingMoves += 2;
+        }
+        if (inPalace(move.to, enemy)) {
+            forcingMoves += 1;
+        }
+    }
+    scale += Math.min(forcingMoves * 8, 40);
+    return Math.max(20, Math.min(scale, 100));
 }
 
 function palaceAttackScore(side) {
@@ -715,19 +766,43 @@ function moveOrderScore(move, side, aiSide, bestMove) {
         score += 5000;
     }
 
+    const ownPatternBefore = weightedTacticalPatternScore(side);
+    const enemyPatternBefore = weightedTacticalPatternScore(opponent(side));
     const snapshot = cloneBoard(board);
     applyMove(move, false);
     score += Math.floor(evaluateMaterial(aiSide) / 10);
-    const patternGain = tacticalPatternScore(side) - tacticalPatternScore(opponent(side));
+    const patternGain = weightedTacticalPatternScore(side) - ownPatternBefore;
+    const enemyPatternDrop = enemyPatternBefore - weightedTacticalPatternScore(opponent(side));
     if (isInCheck(side)) {
         score -= 500;
     }
     board = snapshot;
-    score += patternGain * 2;
+    score += patternGain * 2 + enemyPatternDrop * 3;
+    score -= hangingMovePenalty(move, side);
     if (target.type === TYPE.EMPTY) {
         score += aiHistory.get(historyKey(side, move)) || 0;
     }
     return score;
+}
+
+function hangingMovePenalty(move, side) {
+    if (givesCheck(move, side)) {
+        return 0;
+    }
+
+    const attacker = board[move.from.row][move.from.col];
+    const target = board[move.to.row][move.to.col];
+    const movedValue = pieceValue[attacker.type] || 0;
+    const capturedValue = target.side === opponent(side) ? pieceValue[target.type] || 0 : 0;
+    if (capturedValue >= movedValue) {
+        return 0;
+    }
+
+    const snapshot = cloneBoard(board);
+    applyMove(move, false);
+    const canBeCaptured = legalMoves(opponent(side)).some((reply) => samePos(reply.to, move.to));
+    board = snapshot;
+    return canBeCaptured ? Math.max(0, movedValue - Math.floor(capturedValue / 2)) : 0;
 }
 
 function evaluateMaterial(side) {

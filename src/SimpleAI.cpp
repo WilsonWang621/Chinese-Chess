@@ -254,8 +254,8 @@ int SimpleAI::evaluatePosition(const Board &board, Side side) const {
 
     score += threatScore(board, side) * 2;
     score -= threatScore(board, opponent(side)) * 3;
-    score += tacticalPatternScore(board, side);
-    score -= tacticalPatternScore(board, opponent(side)) * 2;
+    score += weightedTacticalPatternScore(board, side);
+    score -= weightedTacticalPatternScore(board, opponent(side)) * 2;
     if (board.isInCheck(opponent(side))) {
         score += 260;
     }
@@ -326,6 +326,57 @@ int SimpleAI::threatScore(const Board &board, Side side) const {
         score += threats[index] / static_cast<int>(index + 1);
     }
     return score;
+}
+
+int SimpleAI::weightedTacticalPatternScore(const Board &board, Side side) const {
+    return tacticalPatternScore(board, side) * tacticalOpportunityScale(board, side) / 100;
+}
+
+int SimpleAI::tacticalOpportunityScale(const Board &board, Side side) const {
+    Side enemy = opponent(side);
+    int pieces = 0;
+    int attackersInEnemyHalf = 0;
+    for (int row = 0; row < Board::Rows; ++row) {
+        for (int col = 0; col < Board::Cols; ++col) {
+            Piece piece = board.at({row, col});
+            if (piece.type == PieceType::Empty) {
+                continue;
+            }
+            ++pieces;
+            if (piece.side == side && piece.type != PieceType::General) {
+                bool inEnemyHalf = side == Side::Red ? row <= 4 : row >= 5;
+                if (inEnemyHalf) {
+                    ++attackersInEnemyHalf;
+                }
+            }
+        }
+    }
+
+    int scale = 30 + attackersInEnemyHalf * 10;
+    if (pieces <= 26) {
+        scale += 25;
+    } else if (pieces >= 30) {
+        scale -= 15;
+    }
+    if (board.isInCheck(enemy)) {
+        scale += 45;
+    }
+
+    int forcingMoves = 0;
+    for (const Move &move : board.legalMoves(side)) {
+        Piece target = board.at(move.to);
+        if (target.side == enemy && pieceValue(target.type) >= pieceValue(PieceType::Horse)) {
+            ++forcingMoves;
+        }
+        if (givesCheck(board, move, side)) {
+            forcingMoves += 2;
+        }
+        if (inPalaceArea(move.to, enemy)) {
+            ++forcingMoves;
+        }
+    }
+    scale += std::min(forcingMoves * 8, 40);
+    return std::max(20, std::min(scale, 100));
 }
 
 int SimpleAI::tacticalPatternScore(const Board &board, Side side) const {
@@ -516,9 +567,10 @@ int SimpleAI::moveOrderScore(const Board &board, const Move &move, Side movingSi
     Board next = board;
     next.applyMove(move);
     score += evaluateMaterial(next, aiSide) / 10;
-    int patternGain = tacticalPatternScore(next, movingSide) - tacticalPatternScore(board, movingSide);
-    int enemyPatternDrop = tacticalPatternScore(board, opponent(movingSide)) - tacticalPatternScore(next, opponent(movingSide));
+    int patternGain = weightedTacticalPatternScore(next, movingSide) - weightedTacticalPatternScore(board, movingSide);
+    int enemyPatternDrop = weightedTacticalPatternScore(board, opponent(movingSide)) - weightedTacticalPatternScore(next, opponent(movingSide));
     score += patternGain * 2 + enemyPatternDrop * 3;
+    score -= hangingMovePenalty(board, move, movingSide);
     if (next.isInCheck(movingSide)) {
         score -= 500;
     }
@@ -526,6 +578,30 @@ int SimpleAI::moveOrderScore(const Board &board, const Move &move, Side movingSi
         score += history_[sideIndex(movingSide)][squareIndex(move.from)][squareIndex(move.to)];
     }
     return score;
+}
+
+int SimpleAI::hangingMovePenalty(const Board &board, const Move &move, Side movingSide) const {
+    if (givesCheck(board, move, movingSide)) {
+        return 0;
+    }
+
+    Piece attacker = board.at(move.from);
+    Piece target = board.at(move.to);
+    int movedValue = pieceValue(attacker.type);
+    int capturedValue = target.side == opponent(movingSide) ? pieceValue(target.type) : 0;
+    if (capturedValue >= movedValue) {
+        return 0;
+    }
+
+    Board next = board;
+    next.applyMove(move);
+    for (const Move &reply : next.legalMoves(opponent(movingSide))) {
+        if (samePosition(reply.to, move.to)) {
+            int loss = movedValue - capturedValue / 2;
+            return std::max(0, loss);
+        }
+    }
+    return 0;
 }
 
 std::vector<Move> SimpleAI::orderedMoves(const Board &board, Side side, Side aiSide, int limit, bool tacticalOnly) const {
