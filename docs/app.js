@@ -49,6 +49,13 @@ const pieceValue = {
     [TYPE.EMPTY]: 0,
 };
 
+const AI_STRATEGIC_DEPTH = 2;
+const AI_STRATEGIC_MOVE_LIMIT = 6;
+const AI_TACTICAL_DEPTH = 4;
+const AI_TACTICAL_MOVE_LIMIT = 6;
+const AI_WIN_SCORE = 1000000;
+const AI_MATE_SCORE = 900000;
+
 let board = [];
 let turn = SIDE.RED;
 let selected = null;
@@ -267,7 +274,10 @@ function chooseAiMove(moves) {
     let bestScore = -Infinity;
     const bestMoves = [];
     for (const move of moves) {
-        const score = pieceValue[board[move.to.row][move.to.col].type] || 0;
+        const snapshot = cloneBoard(board);
+        applyMove(move, false);
+        const score = strategicSearch(SIDE.RED, SIDE.BLACK, AI_STRATEGIC_DEPTH - 1, -Infinity, Infinity);
+        board = snapshot;
         if (score > bestScore) {
             bestScore = score;
             bestMoves.length = 0;
@@ -277,6 +287,220 @@ function chooseAiMove(moves) {
         }
     }
     return bestMoves[Math.floor(Math.random() * bestMoves.length)];
+}
+
+function strategicSearch(sideToMove, aiSide, depth, alpha, beta) {
+    if (!hasGeneral(aiSide)) {
+        return -AI_WIN_SCORE - depth;
+    }
+    if (!hasGeneral(opponent(aiSide))) {
+        return AI_WIN_SCORE + depth;
+    }
+
+    const legal = legalMoves(sideToMove);
+    if (legal.length === 0) {
+        if (isInCheck(sideToMove)) {
+            return sideToMove === aiSide ? -AI_MATE_SCORE - depth : AI_MATE_SCORE + depth;
+        }
+        return evaluatePosition(aiSide);
+    }
+
+    if (depth <= 0) {
+        return tacticalSearch(sideToMove, aiSide, AI_TACTICAL_DEPTH, alpha, beta);
+    }
+
+    const moves = orderedMoves(sideToMove, aiSide, AI_STRATEGIC_MOVE_LIMIT, false);
+    let bestScore = sideToMove === aiSide ? -Infinity : Infinity;
+    for (const move of moves) {
+        const snapshot = cloneBoard(board);
+        applyMove(move, false);
+        const score = strategicSearch(opponent(sideToMove), aiSide, depth - 1, alpha, beta);
+        board = snapshot;
+
+        if (sideToMove === aiSide) {
+            bestScore = Math.max(bestScore, score);
+            alpha = Math.max(alpha, bestScore);
+        } else {
+            bestScore = Math.min(bestScore, score);
+            beta = Math.min(beta, bestScore);
+        }
+
+        if (beta <= alpha) {
+            break;
+        }
+    }
+    return bestScore;
+}
+
+function tacticalSearch(sideToMove, aiSide, depth, alpha, beta) {
+    if (depth <= 0 || !hasGeneral(SIDE.RED) || !hasGeneral(SIDE.BLACK)) {
+        return evaluatePosition(aiSide);
+    }
+
+    const moves = orderedMoves(sideToMove, aiSide, AI_TACTICAL_MOVE_LIMIT, true);
+    if (moves.length === 0) {
+        return evaluatePosition(aiSide);
+    }
+
+    let bestScore = sideToMove === aiSide ? -Infinity : Infinity;
+    for (const move of moves) {
+        const snapshot = cloneBoard(board);
+        applyMove(move, false);
+        const score = tacticalSearch(opponent(sideToMove), aiSide, depth - 1, alpha, beta);
+        board = snapshot;
+
+        if (sideToMove === aiSide) {
+            bestScore = Math.max(bestScore, score);
+            alpha = Math.max(alpha, bestScore);
+        } else {
+            bestScore = Math.min(bestScore, score);
+            beta = Math.min(beta, bestScore);
+        }
+
+        if (beta <= alpha) {
+            break;
+        }
+    }
+    return bestScore;
+}
+
+function evaluatePosition(side) {
+    if (!hasGeneral(side)) {
+        return -AI_WIN_SCORE;
+    }
+    if (!hasGeneral(opponent(side))) {
+        return AI_WIN_SCORE;
+    }
+
+    let score = 0;
+    for (let row = 0; row < ROWS; row += 1) {
+        for (let col = 0; col < COLS; col += 1) {
+            const piece = board[row][col];
+            if (piece.side === side) {
+                score += (pieceValue[piece.type] || 0) + positionalValue(piece, { row, col }, side);
+            } else if (piece.side === opponent(side)) {
+                score -= (pieceValue[piece.type] || 0) + positionalValue(piece, { row, col }, opponent(side));
+            }
+        }
+    }
+
+    score += threatScore(side) * 2;
+    score -= threatScore(opponent(side)) * 3;
+    if (isInCheck(opponent(side))) {
+        score += 260;
+    }
+    if (isInCheck(side)) {
+        score -= 360;
+    }
+    return score;
+}
+
+function positionalValue(piece, pos, side) {
+    const forward = side === SIDE.RED ? 9 - pos.row : pos.row;
+    const center = 4 - Math.abs(pos.col - 4);
+    switch (piece.type) {
+        case TYPE.GENERAL:
+            return 10 - Math.abs(pos.col - 4) * 4;
+        case TYPE.ADVISOR:
+        case TYPE.ELEPHANT:
+            return 8;
+        case TYPE.HORSE:
+            return center * 8 + forward * 3;
+        case TYPE.CHARIOT:
+            return center * 5 + forward * 2;
+        case TYPE.CANNON:
+            return center * 7 + forward * 2;
+        case TYPE.SOLDIER:
+            return forward * 10 + (forward >= 5 ? center * 6 + 25 : 0);
+        default:
+            return 0;
+    }
+}
+
+function threatScore(side) {
+    const threats = [];
+    for (const move of legalMoves(side)) {
+        let score = 0;
+        const attacker = board[move.from.row][move.from.col];
+        const target = board[move.to.row][move.to.col];
+        if (target.type !== TYPE.EMPTY && target.side === opponent(side)) {
+            score += (pieceValue[target.type] || 0) - Math.floor((pieceValue[attacker.type] || 0) / 8);
+        }
+        if (givesCheck(move, side)) {
+            score += 180;
+        }
+        if (score > 0) {
+            threats.push(score);
+        }
+    }
+
+    threats.sort((left, right) => right - left);
+    return threats.slice(0, 3).reduce((sum, value, index) => sum + Math.floor(value / (index + 1)), 0);
+}
+
+function orderedMoves(side, aiSide, limit, tacticalOnly) {
+    let moves = legalMoves(side);
+    if (tacticalOnly) {
+        const mustAnswerCheck = isInCheck(side);
+        moves = moves.filter((move) => mustAnswerCheck || isCapture(move, side));
+    }
+
+    const scoredMoves = moves.map((move) => ({
+        move,
+        score: moveOrderScore(move, side, aiSide),
+    }));
+    scoredMoves.sort((left, right) => right.score - left.score);
+    const limitedMoves = limit > 0 ? scoredMoves.slice(0, limit) : scoredMoves;
+    return limitedMoves.map((entry) => entry.move);
+}
+
+function moveOrderScore(move, side, aiSide) {
+    const attacker = board[move.from.row][move.from.col];
+    const target = board[move.to.row][move.to.col];
+    let score = 0;
+    if (target.type !== TYPE.EMPTY && target.side === opponent(side)) {
+        score += (pieceValue[target.type] || 0) * 12 - (pieceValue[attacker.type] || 0);
+    }
+    if (givesCheck(move, side)) {
+        score += 2200;
+    }
+
+    const snapshot = cloneBoard(board);
+    applyMove(move, false);
+    score += Math.floor(evaluateMaterial(aiSide) / 10);
+    if (isInCheck(side)) {
+        score -= 500;
+    }
+    board = snapshot;
+    return score;
+}
+
+function evaluateMaterial(side) {
+    let score = 0;
+    for (let row = 0; row < ROWS; row += 1) {
+        for (let col = 0; col < COLS; col += 1) {
+            const piece = board[row][col];
+            if (piece.side === side) {
+                score += pieceValue[piece.type] || 0;
+            } else if (piece.side === opponent(side)) {
+                score -= pieceValue[piece.type] || 0;
+            }
+        }
+    }
+    return score;
+}
+
+function isCapture(move, side) {
+    const target = board[move.to.row][move.to.col];
+    return target.type !== TYPE.EMPTY && target.side === opponent(side);
+}
+
+function givesCheck(move, side) {
+    const snapshot = cloneBoard(board);
+    applyMove(move, false);
+    const checking = isInCheck(opponent(side));
+    board = snapshot;
+    return checking;
 }
 
 function checkGameEndAfterMove(nextSide, winMessage) {
