@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>中国象棋人机对战</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <main class="app-shell">
+        <section class="game-area" aria-label="中国象棋棋盘">
+            <div class="topbar">
+                <div>
+                    <h1>中国象棋</h1>
+                    <p id="statusText">红方先行</p>
+                </div>
+                <button id="resetButton" type="button" aria-label="重新开始">重新开始</button>
+            </div>
+
+            <div class="board-wrap">
+                <div id="board" class="board" role="grid" aria-label="象棋棋盘"></div>
+            </div>
+        </section>
+
+        <aside class="side-panel" aria-label="对局信息">
+            <div class="panel-block">
+                <h2>当前回合</h2>
+                <div id="turnBadge" class="turn-badge">红方</div>
+            </div>
+
+            <div class="panel-block">
+                <h2>最近走法</h2>
+                <ol id="moveList" class="move-list"></ol>
+            </div>
+
+            <div class="panel-block compact-help">
+                <h2>棋子</h2>
+                <div class="piece-key">
+                    <span>帅/将</span>
+                    <span>士</span>
+                    <span>相/象</span>
+                    <span>马</span>
+                    <span>车</span>
+                    <span>炮</span>
+                    <span>兵/卒</span>
+                </div>
+            </div>
+        </aside>
+    </main>
+
+    <div id="resultOverlay" class="result-overlay" hidden aria-live="polite">
+        <div class="confetti" aria-hidden="true"></div>
+        <div class="result-card">
+            <p id="resultTitle">你赢了</p>
+            <button id="overlayResetButton" type="button">再来一局</button>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
