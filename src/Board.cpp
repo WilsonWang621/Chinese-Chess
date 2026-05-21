@@ -61,6 +61,17 @@ bool Board::applyMove(const Move &move) {
     return true;
 }
 
+Board::Undo Board::makeMove(const Move &move) {
+    Undo undo{move, at(move.from), at(move.to)};
+    applyMove(move);
+    return undo;
+}
+
+void Board::unmakeMove(const Undo &undo) {
+    cells_[undo.move.from.row][undo.move.from.col] = undo.moved;
+    cells_[undo.move.to.row][undo.move.to.col] = undo.captured;
+}
+
 std::vector<Move> Board::ruleMoves(Side side) const {
     std::vector<Move> result;
     for (int row = 0; row < Rows; ++row) {
@@ -87,10 +98,31 @@ std::vector<Move> Board::legalMoves(Side side) const {
             }
             for (const Move &move : pseudoMoves(from)) {
                 Board next = *this;
-                next.applyMove(move);
+                Undo undo = next.makeMove(move);
                 if (!next.isInCheck(side)) {
                     result.push_back(move);
                 }
+                next.unmakeMove(undo);
+            }
+        }
+    }
+    return result;
+}
+
+std::vector<Move> Board::legalMovesFast(Side side) {
+    std::vector<Move> result;
+    for (int row = 0; row < Rows; ++row) {
+        for (int col = 0; col < Cols; ++col) {
+            Position from{row, col};
+            if (at(from).side != side) {
+                continue;
+            }
+            for (const Move &move : pseudoMoves(from)) {
+                Undo undo = makeMove(move);
+                if (!isInCheck(side)) {
+                    result.push_back(move);
+                }
+                unmakeMove(undo);
             }
         }
     }
@@ -122,18 +154,107 @@ bool Board::isInCheck(Side side) const {
     if (!inBounds(general)) {
         return true;
     }
-    Side enemy = opponent(side);
-    for (int row = 0; row < Rows; ++row) {
-        for (int col = 0; col < Cols; ++col) {
-            Position from{row, col};
-            if (at(from).side != enemy) {
+    return isSquareAttacked(general, opponent(side));
+}
+
+bool Board::isSquareAttacked(Position pos, Side bySide) const {
+    if (!inBounds(pos)) {
+        return false;
+    }
+
+    const int horseJumps[8][4] = {
+        {-2, -1, -1, 0}, {-2, 1, -1, 0}, {2, -1, 1, 0}, {2, 1, 1, 0},
+        {-1, -2, 0, -1}, {1, -2, 0, -1}, {-1, 2, 0, 1}, {1, 2, 0, 1}
+    };
+    for (const auto &jump : horseJumps) {
+        Position from{pos.row - jump[0], pos.col - jump[1]};
+        Position leg{from.row + jump[2], from.col + jump[3]};
+        if (inBounds(from) && inBounds(leg) && at(leg).type == PieceType::Empty) {
+            Piece piece = at(from);
+            if (piece.side == bySide && piece.type == PieceType::Horse) {
+                return true;
+            }
+        }
+    }
+
+    int soldierForward = bySide == Side::Red ? -1 : 1;
+    Position soldierFrom{pos.row - soldierForward, pos.col};
+    if (inBounds(soldierFrom)) {
+        Piece piece = at(soldierFrom);
+        if (piece.side == bySide && piece.type == PieceType::Soldier) {
+            return true;
+        }
+    }
+    for (int dc : {-1, 1}) {
+        Position from{pos.row, pos.col + dc};
+        if (inBounds(from) && crossedRiver(from, bySide)) {
+            Piece piece = at(from);
+            if (piece.side == bySide && piece.type == PieceType::Soldier) {
+                return true;
+            }
+        }
+    }
+
+    const int advisorDirs[4][2] = {{1, 1}, {1, -1}, {-1, 1}, {-1, -1}};
+    for (const auto &dir : advisorDirs) {
+        Position from{pos.row - dir[0], pos.col - dir[1]};
+        if (inBounds(from)) {
+            Piece piece = at(from);
+            if (piece.side == bySide && piece.type == PieceType::Advisor && inPalace(pos, bySide)) {
+                return true;
+            }
+        }
+    }
+
+    const int elephantDirs[4][4] = {{2, 2, 1, 1}, {2, -2, 1, -1}, {-2, 2, -1, 1}, {-2, -2, -1, -1}};
+    for (const auto &dir : elephantDirs) {
+        Position from{pos.row - dir[0], pos.col - dir[1]};
+        Position eye{from.row + dir[2], from.col + dir[3]};
+        bool ownSide = bySide == Side::Red ? pos.row >= 5 : pos.row <= 4;
+        if (inBounds(from) && inBounds(eye) && ownSide && at(eye).type == PieceType::Empty) {
+            Piece piece = at(from);
+            if (piece.side == bySide && piece.type == PieceType::Elephant) {
+                return true;
+            }
+        }
+    }
+
+    const int generalDirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    for (const auto &dir : generalDirs) {
+        Position from{pos.row - dir[0], pos.col - dir[1]};
+        if (inBounds(from)) {
+            Piece piece = at(from);
+            if (piece.side == bySide && piece.type == PieceType::General && inPalace(pos, bySide)) {
+                return true;
+            }
+        }
+    }
+
+    const int dirs[4][2] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
+    for (const auto &dir : dirs) {
+        bool jumped = false;
+        Position cur{pos.row + dir[0], pos.col + dir[1]};
+        while (inBounds(cur)) {
+            Piece piece = at(cur);
+            if (piece.type == PieceType::Empty) {
+                cur.row += dir[0];
+                cur.col += dir[1];
                 continue;
             }
-            for (const Move &move : pseudoMoves(from)) {
-                if (move.to.row == general.row && move.to.col == general.col) {
+            if (!jumped) {
+                bool flyingGeneral = piece.type == PieceType::General && cur.col == pos.col;
+                if (piece.side == bySide && (piece.type == PieceType::Chariot || flyingGeneral)) {
                     return true;
                 }
+                jumped = true;
+            } else {
+                if (piece.side == bySide && piece.type == PieceType::Cannon) {
+                    return true;
+                }
+                break;
             }
+            cur.row += dir[0];
+            cur.col += dir[1];
         }
     }
     return false;

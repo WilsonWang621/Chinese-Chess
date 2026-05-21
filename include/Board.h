@@ -13,16 +13,26 @@ public:
 
     Board();
 
+    struct Undo {
+        Move move;
+        Piece moved;
+        Piece captured;
+    };
+
     void reset();
     void print() const;
     bool inBounds(Position pos) const;
     Piece at(Position pos) const;
     bool applyMove(const Move &move);
+    Undo makeMove(const Move &move);
+    void unmakeMove(const Undo &undo);
     std::vector<Move> ruleMoves(Side side) const;
     std::vector<Move> legalMoves(Side side) const;
+    std::vector<Move> legalMovesFast(Side side);
     bool isRuleMove(const Move &move, Side side) const;
     bool isLegalMove(const Move &move, Side side) const;
     bool isInCheck(Side side) const;
+    bool isSquareAttacked(Position pos, Side bySide) const;
     bool hasGeneral(Side side) const;
 
 private:

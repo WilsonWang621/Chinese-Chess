@@ -6,6 +6,7 @@
 #include <array>
 #include <chrono>
 #include <cstdint>
+#include <vector>
 #include <random>
 #include <unordered_map>
 
@@ -34,14 +35,19 @@ private:
     std::uint64_t zobristTurn_[3];
     mutable std::unordered_map<std::uint64_t, TranspositionEntry> transposition_;
     mutable std::array<std::array<std::array<int, Board::Rows * Board::Cols>, Board::Rows * Board::Cols>, 3> history_;
+    mutable std::array<std::array<int, 2>, 32> killers_{};
     mutable std::chrono::steady_clock::time_point deadline_;
     mutable bool searchStopped_ = false;
+    mutable std::uint64_t nodes_ = 0;
+    mutable std::uint64_t qnodes_ = 0;
+    mutable std::uint64_t evaluations_ = 0;
+    mutable std::uint64_t legalGenerations_ = 0;
 
     int moveScore(const Board &board, const Move &move, Side side, int depth) const;
     int rootSacrificePenalty(const Board &board, const Move &move, Side side) const;
     int rootImmediateCaptureAdjustment(const Board &board, const Move &move, Side side) const;
-    int strategicSearch(const Board &board, Side turn, Side aiSide, int depth, int alpha, int beta) const;
-    int tacticalSearch(const Board &board, Side turn, Side aiSide, int depth, int alpha, int beta) const;
+    int strategicSearch(Board &board, Side turn, Side aiSide, int depth, int ply, int alpha, int beta) const;
+    int quiescenceSearch(Board &board, Side turn, Side aiSide, int depth, int alpha, int beta) const;
     int evaluatePosition(const Board &board, Side side) const;
     int evaluateMaterial(const Board &board, Side side) const;
     int positionalValue(Piece piece, Position pos, Side side) const;
@@ -52,9 +58,13 @@ private:
     int palaceAttackScore(const Board &board, Side side) const;
     int linePressureScore(const Board &board, Side side) const;
     int mobilityLockScore(const Board &board, Side side) const;
-    int moveOrderScore(const Board &board, const Move &move, Side movingSide, Side aiSide, int ttBestMove) const;
+    int moveOrderScore(const Board &board, const Move &move, Side movingSide, Side aiSide, int ttBestMove, int ply) const;
     int hangingMovePenalty(const Board &board, const Move &move, Side movingSide) const;
-    std::vector<Move> orderedMoves(const Board &board, Side side, Side aiSide, int limit, bool tacticalOnly) const;
+    int staticExchangeScore(const Board &board, const Move &move, Side movingSide) const;
+    int exchangeSequenceScore(Board &board, Position target, Side side) const;
+    bool leastValuableAttacker(const Board &board, Side side, Position target, Move &attacker) const;
+    std::vector<Move> legalMoves(Board &board, Side side) const;
+    std::vector<Move> orderedMoves(Board &board, Side side, Side aiSide, int limit, bool tacticalOnly, int ply) const;
     bool isCapture(const Board &board, const Move &move, Side side) const;
     bool givesCheck(const Board &board, const Move &move, Side side) const;
     bool timeExpired() const;

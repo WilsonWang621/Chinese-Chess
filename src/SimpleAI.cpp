@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <ctime>
 #include <functional>
+#include <iostream>
 #include <limits>
 #include <utility>
 
@@ -14,7 +15,7 @@ const int RootMoveLimit = 12;
 const int MaxIterativeDepth = 5;
 const int MoveTimeMs = 1600;
 const int StrategicMoveLimit = 10;
-const int TacticalDepth = 5;
+const int QuiescenceDepth = 6;
 const int TacticalMoveLimit = 10;
 }
 
@@ -38,6 +39,12 @@ SimpleAI::SimpleAI() : engine_(static_cast<unsigned int>(std::time(nullptr))) {
 }
 
 Move SimpleAI::chooseMove(const Board &board, Side side) {
+    nodes_ = 0;
+    qnodes_ = 0;
+    evaluations_ = 0;
+    legalGenerations_ = 0;
+
+    ++legalGenerations_;
     std::vector<Move> moves = board.legalMoves(side);
     if (moves.empty()) {
         return {};
@@ -49,8 +56,9 @@ Move SimpleAI::chooseMove(const Board &board, Side side) {
         transposition_.clear();
     }
 
+    Board rootBoard = board;
     std::vector<Move> bestMoves{moves.front()};
-    std::vector<Move> candidates = orderedMoves(board, side, side, RootMoveLimit, false);
+    std::vector<Move> candidates = orderedMoves(rootBoard, side, side, RootMoveLimit, false, 0);
     std::vector<Move> urgentCaptures;
     int urgentCaptureValue = pieceValue(PieceType::Horse);
     for (const Move &move : moves) {
@@ -109,13 +117,17 @@ Move SimpleAI::chooseMove(const Board &board, Side side) {
     }
 
     std::uniform_int_distribution<std::size_t> dist(0, bestMoves.size() - 1);
+    std::cerr << "AI stats: nodes=" << nodes_
+              << " qnodes=" << qnodes_
+              << " evals=" << evaluations_
+              << " legalMoves=" << legalGenerations_ << "\n";
     return bestMoves[dist(engine_)];
 }
 
 int SimpleAI::moveScore(const Board &board, const Move &move, Side side, int depth) const {
     Board next = board;
     next.applyMove(move);
-    int score = strategicSearch(next, opponent(side), side, depth - 1,
+    int score = strategicSearch(next, opponent(side), side, depth - 1, 1,
                                 std::numeric_limits<int>::min(),
                                 std::numeric_limits<int>::max());
     return score - rootSacrificePenalty(board, move, side) + rootImmediateCaptureAdjustment(board, move, side);
@@ -126,37 +138,24 @@ int SimpleAI::rootSacrificePenalty(const Board &board, const Move &move, Side si
         return 0;
     }
 
-    Piece attacker = board.at(move.from);
-    Piece target = board.at(move.to);
-    int movedValue = pieceValue(attacker.type);
-    int capturedValue = target.side == opponent(side) ? pieceValue(target.type) : 0;
-    int netLoss = movedValue - capturedValue;
-    if (netLoss <= pieceValue(PieceType::Soldier)) {
+    int see = staticExchangeScore(board, move, side);
+    if (see >= -pieceValue(PieceType::Soldier)) {
         return 0;
     }
 
     Board next = board;
     next.applyMove(move);
-    bool canBeCaptured = false;
-    for (const Move &reply : next.legalMoves(opponent(side))) {
-        if (samePosition(reply.to, move.to)) {
-            canBeCaptured = true;
-            break;
-        }
-    }
-    if (!canBeCaptured) {
+    Move reply;
+    if (!leastValuableAttacker(next, opponent(side), move.to, reply)) {
         return 0;
     }
 
-    int ownPatternGain = weightedTacticalPatternScore(next, side) - weightedTacticalPatternScore(board, side);
-    int enemyPatternDrop = weightedTacticalPatternScore(board, opponent(side)) - weightedTacticalPatternScore(next, opponent(side));
-    int tacticalCompensation = std::max(0, ownPatternGain) + std::max(0, enemyPatternDrop) + threatScore(next, side);
-    int uncompensatedLoss = std::max(0, netLoss - tacticalCompensation / 3);
-    return uncompensatedLoss * 3;
+    return -see * 5;
 }
 
 int SimpleAI::rootImmediateCaptureAdjustment(const Board &board, const Move &move, Side side) const {
     int bestCaptureValue = 0;
+    ++legalGenerations_;
     for (const Move &candidate : board.legalMoves(side)) {
         Piece target = board.at(candidate.to);
         if (target.side != opponent(side)) {
@@ -182,7 +181,8 @@ int SimpleAI::rootImmediateCaptureAdjustment(const Board &board, const Move &mov
     return -bestCaptureValue;
 }
 
-int SimpleAI::strategicSearch(const Board &board, Side turn, Side aiSide, int depth, int alpha, int beta) const {
+int SimpleAI::strategicSearch(Board &board, Side turn, Side aiSide, int depth, int ply, int alpha, int beta) const {
+    ++nodes_;
     if (timeExpired()) {
         searchStopped_ = true;
         return evaluatePosition(board, aiSide);
@@ -194,7 +194,7 @@ int SimpleAI::strategicSearch(const Board &board, Side turn, Side aiSide, int de
         return WinScore + depth;
     }
 
-    std::vector<Move> legal = board.legalMoves(turn);
+    std::vector<Move> legal = legalMoves(board, turn);
     if (legal.empty()) {
         if (board.isInCheck(turn)) {
             return turn == aiSide ? -MateScore - depth : MateScore + depth;
@@ -203,7 +203,7 @@ int SimpleAI::strategicSearch(const Board &board, Side turn, Side aiSide, int de
     }
 
     if (depth <= 0) {
-        return tacticalSearch(board, turn, aiSide, TacticalDepth, alpha, beta);
+        return quiescenceSearch(board, turn, aiSide, QuiescenceDepth, alpha, beta);
     }
 
     int originalAlpha = alpha;
@@ -229,14 +229,21 @@ int SimpleAI::strategicSearch(const Board &board, Side turn, Side aiSide, int de
         }
     }
 
-    std::vector<Move> moves = orderedMoves(board, turn, aiSide, StrategicMoveLimit, false);
+    std::vector<Move> moves = orderedMoves(board, turn, aiSide, StrategicMoveLimit, false, ply);
     int bestScore = turn == aiSide ? std::numeric_limits<int>::min()
                                    : std::numeric_limits<int>::max();
     int bestMove = -1;
+    int moveIndex = 0;
     for (const Move &move : moves) {
-        Board next = board;
-        next.applyMove(move);
-        int score = strategicSearch(next, opponent(turn), aiSide, depth - 1, alpha, beta);
+        bool capture = isCapture(board, move, turn);
+        bool check = givesCheck(board, move, turn);
+        int nextDepth = depth - 1;
+        if (depth >= 3 && moveIndex >= 3 && !check && !capture && staticExchangeScore(board, move, turn) >= 0) {
+            nextDepth = std::max(0, nextDepth - 1);
+        }
+        Board::Undo undo = board.makeMove(move);
+        int score = strategicSearch(board, opponent(turn), aiSide, nextDepth, ply + 1, alpha, beta);
+        board.unmakeMove(undo);
         if (searchStopped_) {
             return evaluatePosition(board, aiSide);
         }
@@ -256,11 +263,19 @@ int SimpleAI::strategicSearch(const Board &board, Side turn, Side aiSide, int de
         }
 
         if (beta <= alpha) {
-            if (!isCapture(board, move, turn)) {
+            if (!capture) {
                 history_[sideIndex(turn)][squareIndex(move.from)][squareIndex(move.to)] += depth * depth;
+                if (ply >= 0 && ply < static_cast<int>(killers_.size())) {
+                    int encoded = encodeMove(move);
+                    if (killers_[ply][0] != encoded) {
+                        killers_[ply][1] = killers_[ply][0];
+                        killers_[ply][0] = encoded;
+                    }
+                }
             }
             break;
         }
+        ++moveIndex;
     }
 
     if (!searchStopped_) {
@@ -275,7 +290,8 @@ int SimpleAI::strategicSearch(const Board &board, Side turn, Side aiSide, int de
     return bestScore;
 }
 
-int SimpleAI::tacticalSearch(const Board &board, Side turn, Side aiSide, int depth, int alpha, int beta) const {
+int SimpleAI::quiescenceSearch(Board &board, Side turn, Side aiSide, int depth, int alpha, int beta) const {
+    ++qnodes_;
     if (timeExpired()) {
         searchStopped_ = true;
         return evaluatePosition(board, aiSide);
@@ -284,17 +300,37 @@ int SimpleAI::tacticalSearch(const Board &board, Side turn, Side aiSide, int dep
         return evaluatePosition(board, aiSide);
     }
 
-    std::vector<Move> moves = orderedMoves(board, turn, aiSide, TacticalMoveLimit, true);
-    if (moves.empty()) {
-        return evaluatePosition(board, aiSide);
+    int standPat = evaluatePosition(board, aiSide);
+    bool inCheck = board.isInCheck(turn);
+    if (!inCheck) {
+        if (turn == aiSide) {
+            if (standPat >= beta) {
+                return standPat;
+            }
+            alpha = std::max(alpha, standPat);
+        } else {
+            if (standPat <= alpha) {
+                return standPat;
+            }
+            beta = std::min(beta, standPat);
+        }
     }
 
-    int bestScore = turn == aiSide ? std::numeric_limits<int>::min()
-                                   : std::numeric_limits<int>::max();
+    std::vector<Move> moves = orderedMoves(board, turn, aiSide, TacticalMoveLimit, true, 0);
+    if (moves.empty()) {
+        return standPat;
+    }
+
+    int bestScore = inCheck ? (turn == aiSide ? std::numeric_limits<int>::min()
+                                              : std::numeric_limits<int>::max())
+                            : standPat;
     for (const Move &move : moves) {
-        Board next = board;
-        next.applyMove(move);
-        int score = tacticalSearch(next, opponent(turn), aiSide, depth - 1, alpha, beta);
+        if (!inCheck && !givesCheck(board, move, turn) && staticExchangeScore(board, move, turn) < 0) {
+            continue;
+        }
+        Board::Undo undo = board.makeMove(move);
+        int score = quiescenceSearch(board, opponent(turn), aiSide, depth - 1, alpha, beta);
+        board.unmakeMove(undo);
         if (searchStopped_) {
             return evaluatePosition(board, aiSide);
         }
@@ -315,6 +351,7 @@ int SimpleAI::tacticalSearch(const Board &board, Side turn, Side aiSide, int dep
 }
 
 int SimpleAI::evaluatePosition(const Board &board, Side side) const {
+    ++evaluations_;
     if (!board.hasGeneral(side)) {
         return -WinScore;
     }
@@ -334,10 +371,10 @@ int SimpleAI::evaluatePosition(const Board &board, Side side) const {
         }
     }
 
-    score += threatScore(board, side) * 2;
-    score -= threatScore(board, opponent(side)) * 3;
-    score += weightedTacticalPatternScore(board, side);
-    score -= weightedTacticalPatternScore(board, opponent(side)) * 2;
+    score += threatScore(board, side);
+    score -= threatScore(board, opponent(side)) * 2;
+    score += weightedTacticalPatternScore(board, side) / 2;
+    score -= weightedTacticalPatternScore(board, opponent(side));
     if (board.isInCheck(opponent(side))) {
         score += 260;
     }
@@ -387,7 +424,7 @@ int SimpleAI::positionalValue(Piece piece, Position pos, Side side) const {
 
 int SimpleAI::threatScore(const Board &board, Side side) const {
     std::vector<int> threats;
-    for (const Move &move : board.legalMoves(side)) {
+    for (const Move &move : board.ruleMoves(side)) {
         int score = 0;
         Piece attacker = board.at(move.from);
         Piece target = board.at(move.to);
@@ -445,7 +482,7 @@ int SimpleAI::tacticalOpportunityScale(const Board &board, Side side) const {
     }
 
     int forcingMoves = 0;
-    for (const Move &move : board.legalMoves(side)) {
+    for (const Move &move : board.ruleMoves(side)) {
         Piece target = board.at(move.to);
         if (target.side == enemy && pieceValue(target.type) >= pieceValue(PieceType::Horse)) {
             ++forcingMoves;
@@ -492,7 +529,7 @@ int SimpleAI::palaceAttackScore(const Board &board, Side side) const {
         }
     }
 
-    for (const Move &move : board.legalMoves(side)) {
+    for (const Move &move : board.ruleMoves(side)) {
         Piece attacker = board.at(move.from);
         bool inEnemyPalace = inPalaceArea(move.to, enemy);
         bool attacksGeneral = samePosition(move.to, enemyGeneral);
@@ -616,7 +653,7 @@ int SimpleAI::mobilityLockScore(const Board &board, Side side) const {
             }
 
             int mobility = 0;
-            for (const Move &move : board.legalMoves(enemy)) {
+            for (const Move &move : board.ruleMoves(enemy)) {
                 if (samePosition(move.from, pos)) {
                     ++mobility;
                 }
@@ -632,7 +669,7 @@ int SimpleAI::mobilityLockScore(const Board &board, Side side) const {
     return score;
 }
 
-int SimpleAI::moveOrderScore(const Board &board, const Move &move, Side movingSide, Side aiSide, int ttBestMove) const {
+int SimpleAI::moveOrderScore(const Board &board, const Move &move, Side movingSide, Side, int ttBestMove, int ply) const {
     Piece attacker = board.at(move.from);
     Piece target = board.at(move.to);
     int score = 0;
@@ -640,24 +677,24 @@ int SimpleAI::moveOrderScore(const Board &board, const Move &move, Side movingSi
         score += 100000;
     }
     if (target.type != PieceType::Empty && target.side == opponent(movingSide)) {
-        score += pieceValue(target.type) * 16 - pieceValue(attacker.type);
+        int see = staticExchangeScore(board, move, movingSide);
+        score += 7000 + pieceValue(target.type) * 14 - pieceValue(attacker.type);
+        score += see >= 0 ? see * 3 : see * 8;
     }
     if (givesCheck(board, move, movingSide)) {
         score += 5000;
     }
-
-    Board next = board;
-    next.applyMove(move);
-    score += evaluateMaterial(next, aiSide) / 10;
-    int patternGain = weightedTacticalPatternScore(next, movingSide) - weightedTacticalPatternScore(board, movingSide);
-    int enemyPatternDrop = weightedTacticalPatternScore(board, opponent(movingSide)) - weightedTacticalPatternScore(next, opponent(movingSide));
-    score += patternGain * 2 + enemyPatternDrop * 3;
-    score -= hangingMovePenalty(board, move, movingSide);
-    if (next.isInCheck(movingSide)) {
-        score -= 500;
+    if (ply >= 0 && ply < static_cast<int>(killers_.size())) {
+        int encoded = encodeMove(move);
+        if (killers_[ply][0] == encoded) {
+            score += 4200;
+        } else if (killers_[ply][1] == encoded) {
+            score += 2600;
+        }
     }
     if (target.type == PieceType::Empty) {
         score += history_[sideIndex(movingSide)][squareIndex(move.from)][squareIndex(move.to)];
+        score -= hangingMovePenalty(board, move, movingSide);
     }
     return score;
 }
@@ -677,16 +714,53 @@ int SimpleAI::hangingMovePenalty(const Board &board, const Move &move, Side movi
 
     Board next = board;
     next.applyMove(move);
-    for (const Move &reply : next.legalMoves(opponent(movingSide))) {
-        if (samePosition(reply.to, move.to)) {
-            int loss = movedValue - capturedValue / 2;
-            return std::max(0, loss);
-        }
-    }
-    return 0;
+    int loss = exchangeSequenceScore(next, move.to, opponent(movingSide));
+    return std::max(0, loss - capturedValue / 2);
 }
 
-std::vector<Move> SimpleAI::orderedMoves(const Board &board, Side side, Side aiSide, int limit, bool tacticalOnly) const {
+int SimpleAI::staticExchangeScore(const Board &board, const Move &move, Side movingSide) const {
+    Piece target = board.at(move.to);
+    int gain = target.side == opponent(movingSide) ? pieceValue(target.type) : 0;
+    Board next = board;
+    next.applyMove(move);
+    return gain - std::max(0, exchangeSequenceScore(next, move.to, opponent(movingSide)));
+}
+
+int SimpleAI::exchangeSequenceScore(Board &board, Position target, Side side) const {
+    Move attacker;
+    if (!leastValuableAttacker(board, side, target, attacker)) {
+        return 0;
+    }
+
+    int capturedValue = pieceValue(board.at(target).type);
+    Board::Undo undo = board.makeMove(attacker);
+    int replyScore = exchangeSequenceScore(board, target, opponent(side));
+    board.unmakeMove(undo);
+    return capturedValue - std::max(0, replyScore);
+}
+
+bool SimpleAI::leastValuableAttacker(const Board &board, Side side, Position target, Move &attacker) const {
+    int best = std::numeric_limits<int>::max();
+    bool found = false;
+    for (const Move &move : board.ruleMoves(side)) {
+        if (samePosition(move.to, target)) {
+            int value = pieceValue(board.at(move.from).type);
+            if (value < best) {
+                best = value;
+                attacker = move;
+                found = true;
+            }
+        }
+    }
+    return found;
+}
+
+std::vector<Move> SimpleAI::legalMoves(Board &board, Side side) const {
+    ++legalGenerations_;
+    return board.legalMovesFast(side);
+}
+
+std::vector<Move> SimpleAI::orderedMoves(Board &board, Side side, Side aiSide, int limit, bool tacticalOnly, int ply) const {
     struct ScoredMove {
         Move move;
         int score;
@@ -700,9 +774,11 @@ std::vector<Move> SimpleAI::orderedMoves(const Board &board, Side side, Side aiS
     }
 
     bool mustAnswerCheck = board.isInCheck(side);
-    for (const Move &move : board.legalMoves(side)) {
-        if (!tacticalOnly || mustAnswerCheck || isCapture(board, move, side)) {
-            scoredMoves.push_back({move, moveOrderScore(board, move, side, aiSide, ttBestMove)});
+    for (const Move &move : legalMoves(board, side)) {
+        bool capture = isCapture(board, move, side);
+        bool check = givesCheck(board, move, side);
+        if (!tacticalOnly || mustAnswerCheck || capture || check) {
+            scoredMoves.push_back({move, moveOrderScore(board, move, side, aiSide, ttBestMove, ply)});
         }
     }
 

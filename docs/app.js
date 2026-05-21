@@ -53,7 +53,7 @@ const AI_ROOT_MOVE_LIMIT = 12;
 const AI_MAX_ITERATIVE_DEPTH = 5;
 const AI_MOVE_TIME_MS = 1200;
 const AI_STRATEGIC_MOVE_LIMIT = 10;
-const AI_TACTICAL_DEPTH = 5;
+const AI_QUIESCENCE_DEPTH = 6;
 const AI_TACTICAL_MOVE_LIMIT = 10;
 const AI_WIN_SCORE = 1000000;
 const AI_MATE_SCORE = 900000;
@@ -348,31 +348,21 @@ function rootSacrificePenalty(sourceBoard, move, side) {
         return 0;
     }
 
-    const attacker = board[move.from.row][move.from.col];
-    const target = board[move.to.row][move.to.col];
-    const movedValue = pieceValue[attacker.type] || 0;
-    const capturedValue = target.side === opponent(side) ? pieceValue[target.type] || 0 : 0;
-    const netLoss = movedValue - capturedValue;
-    if (netLoss <= pieceValue[TYPE.SOLDIER]) {
+    const see = staticExchangeScore(move, side);
+    if (see >= -(pieceValue[TYPE.SOLDIER] || 0)) {
         board = snapshot;
         return 0;
     }
 
-    const beforeOwnPattern = weightedTacticalPatternScore(side);
-    const beforeEnemyPattern = weightedTacticalPatternScore(opponent(side));
     applyMove(move, false);
-    const canBeCaptured = legalMoves(opponent(side)).some((reply) => samePos(reply.to, move.to));
+    const canBeCaptured = leastValuableAttacker(opponent(side), move.to) !== null;
     if (!canBeCaptured) {
         board = snapshot;
         return 0;
     }
 
-    const ownPatternGain = weightedTacticalPatternScore(side) - beforeOwnPattern;
-    const enemyPatternDrop = beforeEnemyPattern - weightedTacticalPatternScore(opponent(side));
-    const tacticalCompensation = Math.max(0, ownPatternGain) + Math.max(0, enemyPatternDrop) + threatScore(side);
-    const uncompensatedLoss = Math.max(0, netLoss - Math.floor(tacticalCompensation / 3));
     board = snapshot;
-    return uncompensatedLoss * 3;
+    return -see * 5;
 }
 
 function rootImmediateCaptureAdjustment(sourceBoard, move, side) {
@@ -425,7 +415,7 @@ function strategicSearch(sideToMove, aiSide, depth, alpha, beta) {
     }
 
     if (depth <= 0) {
-        return tacticalSearch(sideToMove, aiSide, AI_TACTICAL_DEPTH, alpha, beta);
+        return quiescenceSearch(sideToMove, aiSide, AI_QUIESCENCE_DEPTH, alpha, beta);
     }
 
     const originalAlpha = alpha;
@@ -493,7 +483,7 @@ function strategicSearch(sideToMove, aiSide, depth, alpha, beta) {
     return bestScore;
 }
 
-function tacticalSearch(sideToMove, aiSide, depth, alpha, beta) {
+function quiescenceSearch(sideToMove, aiSide, depth, alpha, beta) {
     if (timeExpired()) {
         aiSearchStopped = true;
         return evaluatePosition(aiSide);
@@ -502,16 +492,35 @@ function tacticalSearch(sideToMove, aiSide, depth, alpha, beta) {
         return evaluatePosition(aiSide);
     }
 
-    const moves = orderedMoves(sideToMove, aiSide, AI_TACTICAL_MOVE_LIMIT, true);
-    if (moves.length === 0) {
-        return evaluatePosition(aiSide);
+    const standPat = evaluatePosition(aiSide);
+    const inCheckNow = isInCheck(sideToMove);
+    if (!inCheckNow) {
+        if (sideToMove === aiSide) {
+            if (standPat >= beta) {
+                return standPat;
+            }
+            alpha = Math.max(alpha, standPat);
+        } else {
+            if (standPat <= alpha) {
+                return standPat;
+            }
+            beta = Math.min(beta, standPat);
+        }
     }
 
-    let bestScore = sideToMove === aiSide ? -Infinity : Infinity;
+    const moves = orderedMoves(sideToMove, aiSide, AI_TACTICAL_MOVE_LIMIT, true);
+    if (moves.length === 0) {
+        return standPat;
+    }
+
+    let bestScore = inCheckNow ? (sideToMove === aiSide ? -Infinity : Infinity) : standPat;
     for (const move of moves) {
+        if (!inCheckNow && !givesCheck(move, sideToMove) && staticExchangeScore(move, sideToMove) < 0) {
+            continue;
+        }
         const snapshot = cloneBoard(board);
         applyMove(move, false);
-        const score = tacticalSearch(opponent(sideToMove), aiSide, depth - 1, alpha, beta);
+        const score = quiescenceSearch(opponent(sideToMove), aiSide, depth - 1, alpha, beta);
         board = snapshot;
 
         if (aiSearchStopped) {
@@ -552,10 +561,10 @@ function evaluatePosition(side) {
         }
     }
 
-    score += threatScore(side) * 2;
-    score -= threatScore(opponent(side)) * 3;
-    score += weightedTacticalPatternScore(side);
-    score -= weightedTacticalPatternScore(opponent(side)) * 2;
+    score += threatScore(side);
+    score -= threatScore(opponent(side)) * 2;
+    score += Math.floor(weightedTacticalPatternScore(side) / 2);
+    score -= weightedTacticalPatternScore(opponent(side));
     if (isInCheck(opponent(side))) {
         score += 260;
     }
@@ -589,7 +598,7 @@ function positionalValue(piece, pos, side) {
 
 function threatScore(side) {
     const threats = [];
-    for (const move of legalMoves(side)) {
+    for (const move of ruleMoves(side)) {
         let score = 0;
         const attacker = board[move.from.row][move.from.col];
         const target = board[move.to.row][move.to.col];
@@ -647,7 +656,7 @@ function tacticalOpportunityScale(side) {
     }
 
     let forcingMoves = 0;
-    for (const move of legalMoves(side)) {
+    for (const move of ruleMoves(side)) {
         const target = board[move.to.row][move.to.col];
         if (target.side === enemy && (pieceValue[target.type] || 0) >= pieceValue[TYPE.HORSE]) {
             forcingMoves += 1;
@@ -688,7 +697,7 @@ function palaceAttackScore(side) {
         }
     }
 
-    for (const move of legalMoves(side)) {
+    for (const move of ruleMoves(side)) {
         const attacker = board[move.from.row][move.from.col];
         const inEnemyPalace = inPalace(move.to, enemy);
         const attacksGeneral = samePos(move.to, enemyGeneral);
@@ -794,7 +803,7 @@ function linePressureScore(side) {
 
 function mobilityLockScore(side) {
     const enemy = opponent(side);
-    const enemyMoves = legalMoves(enemy);
+    const enemyMoves = ruleMoves(enemy);
     let score = 0;
     for (let row = 0; row < ROWS; row += 1) {
         for (let col = 0; col < COLS; col += 1) {
@@ -818,7 +827,7 @@ function orderedMoves(side, aiSide, limit, tacticalOnly) {
     let moves = legalMoves(side);
     if (tacticalOnly) {
         const mustAnswerCheck = isInCheck(side);
-        moves = moves.filter((move) => mustAnswerCheck || isCapture(move, side));
+        moves = moves.filter((move) => mustAnswerCheck || isCapture(move, side) || givesCheck(move, side));
     }
     return orderMoveList(moves, side, aiSide, limit);
 }
@@ -840,27 +849,17 @@ function moveOrderScore(move, side, aiSide, bestMove) {
     const target = board[move.to.row][move.to.col];
     let score = moveKey(move) === bestMove ? 100000 : 0;
     if (target.type !== TYPE.EMPTY && target.side === opponent(side)) {
-        score += (pieceValue[target.type] || 0) * 16 - (pieceValue[attacker.type] || 0);
+        const see = staticExchangeScore(move, side);
+        score += 7000 + (pieceValue[target.type] || 0) * 14 - (pieceValue[attacker.type] || 0);
+        score += see >= 0 ? see * 3 : see * 8;
     }
     if (givesCheck(move, side)) {
         score += 5000;
     }
 
-    const ownPatternBefore = weightedTacticalPatternScore(side);
-    const enemyPatternBefore = weightedTacticalPatternScore(opponent(side));
-    const snapshot = cloneBoard(board);
-    applyMove(move, false);
-    score += Math.floor(evaluateMaterial(aiSide) / 10);
-    const patternGain = weightedTacticalPatternScore(side) - ownPatternBefore;
-    const enemyPatternDrop = enemyPatternBefore - weightedTacticalPatternScore(opponent(side));
-    if (isInCheck(side)) {
-        score -= 500;
-    }
-    board = snapshot;
-    score += patternGain * 2 + enemyPatternDrop * 3;
-    score -= hangingMovePenalty(move, side);
     if (target.type === TYPE.EMPTY) {
         score += aiHistory.get(historyKey(side, move)) || 0;
+        score -= hangingMovePenalty(move, side);
     }
     return score;
 }
@@ -880,9 +879,48 @@ function hangingMovePenalty(move, side) {
 
     const snapshot = cloneBoard(board);
     applyMove(move, false);
-    const canBeCaptured = legalMoves(opponent(side)).some((reply) => samePos(reply.to, move.to));
+    const loss = exchangeSequenceScore(move.to, opponent(side));
     board = snapshot;
-    return canBeCaptured ? Math.max(0, movedValue - Math.floor(capturedValue / 2)) : 0;
+    return Math.max(0, loss - Math.floor(capturedValue / 2));
+}
+
+function staticExchangeScore(move, side) {
+    const target = board[move.to.row][move.to.col];
+    let gain = target.side === opponent(side) ? pieceValue[target.type] || 0 : 0;
+    const snapshot = cloneBoard(board);
+    applyMove(move, false);
+    gain -= Math.max(0, exchangeSequenceScore(move.to, opponent(side)));
+    board = snapshot;
+    return gain;
+}
+
+function exchangeSequenceScore(target, side) {
+    const attacker = leastValuableAttacker(side, target);
+    if (!attacker) {
+        return 0;
+    }
+
+    const capturedValue = pieceValue[board[target.row][target.col].type] || 0;
+    const snapshot = cloneBoard(board);
+    applyMove(attacker, false);
+    const replyScore = exchangeSequenceScore(target, opponent(side));
+    board = snapshot;
+    return capturedValue - Math.max(0, replyScore);
+}
+
+function leastValuableAttacker(side, target) {
+    let bestValue = Infinity;
+    let bestMove = null;
+    for (const move of ruleMoves(side)) {
+        if (samePos(move.to, target)) {
+            const value = pieceValue[board[move.from.row][move.from.col].type] || 0;
+            if (value < bestValue) {
+                bestValue = value;
+                bestMove = move;
+            }
+        }
+    }
+    return bestMove;
 }
 
 function evaluateMaterial(side) {
